@@ -1,0 +1,146 @@
+A.S.E. EVM v0.1
+MONDAY LAB WIRING SHEET
+
+COMPETITION
+- EVM footprint must remain <= 30 cm x 30 cm.
+- Only Arduino controllers are allowed.
+- Power supply must be <= 12 V.
+- EVM must work standalone; laptop is for development only.
+
+CONTROLLERS
+- UNO #1 = Ballot Unit
+- UNO #2 = Control Unit
+
+IMPORTANT
+- Upload each sketch with the inter-UNO D0/D1 wires disconnected.
+- For normal operation reconnect D0/D1 and common GND.
+- Do not connect RC522 VCC to UNO 5V.
+- RC522 is a 3.3 V device. Use appropriate level shifting for UNO -> RC522
+  signals unless the exact breakout board is documented as 5V-safe.
+
+============================================================
+BALLOT UNO #1
+============================================================
+
+D0/RX <- Control UNO D1/TX
+D1/TX -> Control UNO D0/RX
+GND   -- Control UNO GND
+
+BUTTONS (button from pin to GND)
+D2 -> Candidate A
+D3 -> Candidate B
+D4 -> Candidate C
+D5 -> NOTA
+D6 -> CHANGE
+D7 -> CONFIRM
+
+LEDS
+D8  -> 220R -> A LED anode ; LED cathode -> GND
+D9  -> 220R -> B LED anode ; LED cathode -> GND
+D10 -> 220R -> C LED anode ; LED cathode -> GND
+D11 -> 220R -> NOTA LED anode ; LED cathode -> GND
+
+BUZZER
+D12 -> buzzer +
+GND -> buzzer -
+
+D13 = spare
+
+============================================================
+CONTROL UNO #2
+============================================================
+
+D0/RX <- Ballot UNO D1/TX
+D1/TX -> Ballot UNO D0/RX
+GND   -- Ballot UNO GND
+
+ADMIN BUTTONS (button from pin to GND)
+D2 -> MENU
+D3 -> UP
+D4 -> DOWN
+D5 -> SELECT
+
+D6 -> tamper microswitch
+     INPUT_PULLUP
+     case closed = LOW
+     case open   = HIGH
+
+D7 -> 220R -> status LED -> GND
+D8 -> buzzer +
+
+RC522
+D9  -> RST
+D10 -> SDA/SS
+D11 -> MOSI
+D12 <- MISO
+D13 -> SCK
+3.3V -> RC522 3.3V
+GND  -> RC522 GND
+
+20x4 I2C LCD
+A4 -> SDA
+A5 -> SCL
+5V -> VCC
+GND -> GND
+
+LCD address in code is 0x27.
+If your exact I2C backpack uses 0x3F, change the constant.
+
+============================================================
+FIRST LAB BUILD ORDER
+============================================================
+
+1. Test Ballot UNO alone:
+   buttons -> LEDs -> buzzer -> CHANGE -> CONFIRM.
+
+2. Test Control UNO:
+   LCD -> RFID -> admin buttons -> EEPROM -> tamper.
+
+3. Connect the two UNOs:
+   Ballot TX -> Control RX
+   Control TX -> Ballot RX
+   GND -> GND
+
+4. Verify PING/PONG communication.
+
+5. First-power-up:
+   Control Unit self-tests.
+   If no admin UID exists, it asks for the admin card.
+   Scan one card once to enroll it.
+
+6. Register demo voter cards:
+   Scan admin card -> REGISTER VOTER -> scan voter card.
+   Repeat for several cards.
+
+7. Scan admin card -> OPEN POLL.
+
+8. Test one voter:
+   scan voter card -> select -> CHANGE/CONFIRM.
+
+9. Test duplicate:
+   scan the same voter card again -> must be rejected.
+
+10. Close poll -> VIEW RESULTS.
+
+11. Restart power -> verify stored totals remain.
+
+12. Open poll -> trigger case switch -> verify TAMPER LOCK.
+
+============================================================
+COMMUNICATION FORMAT
+============================================================
+
+COMMAND|DATA|SEQUENCE|CRC
+
+Examples:
+PING|OK|0|XX
+PONG|OK|0|XX
+ENABLE|1|15|XX
+VOTE|B|15|XX
+RECORDED|OK|15|XX
+REJECT|BADSEQ|15|XX
+DISABLE|TAMPER|15|XX
+
+CRC = CRC-8, polynomial 0x07, over COMMAND|DATA|SEQUENCE.
+
+============================================================
