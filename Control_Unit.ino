@@ -1,7 +1,7 @@
 // ============================================================
 //                         A.S.E. EVM
 //                        CONTROL UNIT
-//                           v0.1
+//                           v0.3
 // ============================================================
 //
 // Arduino:
@@ -22,7 +22,7 @@
 // 7. Vote counting
 // 8. EEPROM data storage
 // 9. Optional tamper detection (disabled until a switch is available)
-// 10. Startup self-test
+// 10. Startup self-test and retrying Ballot Unit connection
 // 11. LCD display
 // 12. Communication with the Ballot Unit
 //
@@ -70,7 +70,7 @@
 // ------------------------------------------------------------
 //
 //                         RC522
-//
+// 
 // D9  -> RST
 // D10 -> SDA / SS
 // D11 -> MOSI
@@ -424,6 +424,23 @@ byte adminUIDLength = 0;
 // ------------------------------------------------------------
 
 bool systemReady = false;
+
+
+// ------------------------------------------------------------
+// BALLOT UNIT COMMUNICATION STATUS
+// ------------------------------------------------------------
+// The Control Unit may power up before the Ballot Unit.
+// In that case, keep the user interface alive and retry PINGs
+// until the Ballot Unit responds with PONG instead of freezing.
+// ------------------------------------------------------------
+
+bool ballotCommunicationReady = false;
+bool ballotPingOutstanding = false;
+unsigned long ballotPingSentAt = 0;
+unsigned long nextBallotPingAt = 0;
+
+const unsigned long BALLOT_PING_TIMEOUT_MS = 800;
+const unsigned long BALLOT_PING_INTERVAL_MS = 1500;
 
 
 // ------------------------------------------------------------
@@ -1988,6 +2005,17 @@ void persistElectionState()
 
 void showReadyScreen()
 {
+    // Do not imply that voting is available until the Ballot Unit
+    // has replied to a valid PING message.
+    if (!ballotCommunicationReady)
+    {
+        displayLCD(
+            "BALLOT OFFLINE",
+            "WAITING FOR UNIT"
+        );
+        return;
+    }
+
     if (pollOpen)
     {
         displayLCD(
@@ -1995,7 +2023,6 @@ void showReadyScreen()
             "SCAN VOTER CARD"
         );
     }
-
     else
     {
         displayLCD(
@@ -2004,8 +2031,6 @@ void showReadyScreen()
         );
     }
 }
-
-
 //                    35. RFID SELF-TEST
 // ============================================================
 //
@@ -2043,104 +2068,6 @@ bool testRFID()
 // PONG
 //
 // ============================================================
-
-bool testBallotCommunication()
-{
-    // Clear old serial data.
-
-    while (
-        Serial.available()
-    )
-    {
-        Serial.read();
-    }
-
-
-    // Ask Ballot Unit to respond.
-
-    sendMessage(
-        "PING",
-        "OK",
-        0
-    );
-
-
-    unsigned long startTime =
-        millis();
-
-
-    String responseLine;
-
-
-    // Wait up to 800 ms.
-
-    while (
-        millis() - startTime < 800
-    )
-    {
-        while (
-            Serial.available()
-        )
-        {
-            char receivedCharacter =
-                (char)Serial.read();
-
-
-            if (
-                receivedCharacter == '\n'
-            )
-            {
-                responseLine.trim();
-
-
-                if (
-                    responseLine.length() > 0
-                )
-                {
-                    String command;
-
-                    String data;
-
-                    uint32_t sequence = 0;
-
-
-                    bool valid =
-                        parseMessage(
-                            responseLine,
-                            command,
-                            data,
-                            sequence
-                        );
-
-
-                    if (
-                        valid &&
-                        command == "PONG" &&
-                        data == "OK"
-                    )
-                    {
-                        return true;
-                    }
-                }
-
-
-                responseLine = "";
-            }
-
-            else if (
-                responseLine.length() < 60
-            )
-            {
-                responseLine +=
-                    receivedCharacter;
-            }
-        }
-    }
-
-
-    return false;
-}
-
 
 // ============================================================
 //                    37. ADMIN ENROLLMENT
@@ -2383,30 +2310,11 @@ void registerVoter()
 // ============================================================
 //
 // A 16x2 LCD cannot show all four candidate totals at once.
-// Results are therefore shown on separate pages.
-// Push LEFT on the joystick to leave the results early.
+// Results are shown on pages controlled by the joystick:
+// UP/DOWN scroll through pages; LEFT or press exits.
+// Pages do not change automatically, so users can read them.
 //
 // ============================================================
-
-bool waitForLeftOrTimeout(
-    unsigned long duration
-)
-{
-    unsigned long startTime = millis();
-
-    while (millis() - startTime < duration)
-    {
-        if (readJoystickAction() == JOY_LEFT)
-        {
-            return true;
-        }
-
-        delay(10);
-    }
-
-    return false;
-}
-
 
 void showResults()
 {
@@ -2418,73 +2326,86 @@ void showResults()
         electionState.voteCount[2] +
         electionState.voteCount[3];
 
-    displayLCD(
-        "FINAL RESULTS",
-        "LEFT = EXIT"
-    );
+    // Page 0: Candidates A and B.
+    // Page 1: Candidate C and NOTA.
+    // Page 2: Total votes.
+    // UP/DOWN changes pages. LEFT or pressing the stick exits.
+    byte page = 0;
 
-    if (waitForLeftOrTimeout(900))
+    while (true)
     {
-        showReadyScreen();
-        return;
+        if (page == 0)
+        {
+            snprintf(
+                lineBuffer,
+                sizeof(lineBuffer),
+                "A:%u B:%u",
+                electionState.voteCount[0],
+                electionState.voteCount[1]
+            );
+
+            displayLCD(
+                "A/B 1/3 UP/DN",
+                lineBuffer
+            );
+        }
+        else if (page == 1)
+        {
+            snprintf(
+                lineBuffer,
+                sizeof(lineBuffer),
+                "C:%u N:%u",
+                electionState.voteCount[2],
+                electionState.voteCount[3]
+            );
+
+            displayLCD(
+                "C/N 2/3 UP/DN",
+                lineBuffer
+            );
+        }
+        else
+        {
+            snprintf(
+                lineBuffer,
+                sizeof(lineBuffer),
+                "TOTAL: %lu",
+                totalVotes
+            );
+
+            displayLCD(
+                "TOTAL 3/3 UP/DN",
+                lineBuffer
+            );
+        }
+
+        // Wait for a deliberate joystick action. There is no
+        // automatic timeout, so judges can read each result page.
+        JoystickAction action = JOY_NONE;
+
+        while (action == JOY_NONE)
+        {
+            action = (JoystickAction)readJoystickAction();
+            delay(10);
+        }
+
+        if (action == JOY_UP)
+        {
+            page = (page + 2) % 3;
+        }
+        else if (action == JOY_DOWN)
+        {
+            page = (page + 1) % 3;
+        }
+        else if (action == JOY_LEFT || action == JOY_SELECT)
+        {
+            showReadyScreen();
+            return;
+        }
+
+        // JOY_RIGHT is reserved and leaves the current page shown.
     }
-
-    snprintf(
-        lineBuffer,
-        sizeof(lineBuffer),
-        "A:%u B:%u",
-        electionState.voteCount[0],
-        electionState.voteCount[1]
-    );
-
-    displayLCD(
-        "CANDIDATE A / B",
-        lineBuffer
-    );
-
-    if (waitForLeftOrTimeout(1800))
-    {
-        showReadyScreen();
-        return;
-    }
-
-    snprintf(
-        lineBuffer,
-        sizeof(lineBuffer),
-        "C:%u N:%u",
-        electionState.voteCount[2],
-        electionState.voteCount[3]
-    );
-
-    displayLCD(
-        "CANDIDATE C / N",
-        lineBuffer
-    );
-
-    if (waitForLeftOrTimeout(1800))
-    {
-        showReadyScreen();
-        return;
-    }
-
-    snprintf(
-        lineBuffer,
-        sizeof(lineBuffer),
-        "TOTAL: %lu",
-        totalVotes
-    );
-
-    displayLCD(
-        "TOTAL VOTES",
-        lineBuffer
-    );
-
-    waitForLeftOrTimeout(1800);
-
-    showReadyScreen();
 }
-
-
 //                    40. COUNT USED VOTERS
 // ============================================================
 //
@@ -2621,16 +2542,17 @@ void executeMenuOption()
                 "OPEN"
             );
         }
-
+        else if (!ballotCommunicationReady)
+        {
+            displayLCD(
+                "BALLOT OFFLINE",
+                "POLL NOT OPENED"
+            );
+        }
         else
         {
-            pollOpen =
-                true;
-
-
-            adminSessionActive =
-                false;
-
+            pollOpen = true;
+            adminSessionActive = false;
 
             displayLCD(
                 "POLLING ACTIVE",
@@ -3191,6 +3113,21 @@ void handleRFID()
 
 
     // ========================================================
+    // BALLOT UNIT MUST BE CONNECTED
+    // ========================================================
+
+    if (!ballotCommunicationReady)
+    {
+        displayLCD(
+            "BALLOT OFFLINE",
+            "TRY AGAIN LATER"
+        );
+        delay(600);
+        return;
+    }
+
+
+    // ========================================================
     // POLL MUST BE OPEN
     // ========================================================
 
@@ -3577,6 +3514,45 @@ void processReceivedVote(
 
 
 // ============================================================
+//                    BALLOT CONNECTION RETRY
+// ============================================================
+// Sends non-blocking PING attempts while the Ballot Unit is
+// offline. This lets the Control Unit boot first without locking
+// forever on a communications self-test.
+// ============================================================
+
+void ballotCommunicationTask()
+{
+    if (ballotCommunicationReady)
+    {
+        return;
+    }
+
+    unsigned long now = millis();
+
+    if (ballotPingOutstanding)
+    {
+        if (now - ballotPingSentAt < BALLOT_PING_TIMEOUT_MS)
+        {
+            return;
+        }
+
+        // The response did not arrive this time. Keep the UI
+        // responsive and try again after the retry interval.
+        ballotPingOutstanding = false;
+    }
+
+    if ((long)(now - nextBallotPingAt) >= 0)
+    {
+        sendMessage("PING", "OK", 0);
+        ballotPingOutstanding = true;
+        ballotPingSentAt = now;
+        nextBallotPingAt = now + BALLOT_PING_INTERVAL_MS;
+    }
+}
+
+
+// ============================================================
 //                    48. SERIAL TASK
 // ============================================================
 //
@@ -3592,53 +3568,109 @@ void processReceivedVote(
 
 void serialTask()
 {
-    while (
-        Serial.available()
-    )
+    while (Serial.available())
     {
-        char receivedCharacter =
-            (char)Serial.read();
-
+        char receivedCharacter = (char)Serial.read();
 
         // ====================================================
         // COMPLETE MESSAGE RECEIVED
         // ====================================================
 
-        if (
-            receivedCharacter == '\n'
-        )
+        if (receivedCharacter == '\n')
         {
             receivedSerialData.trim();
 
-
-            if (
-                receivedSerialData.length() > 0
-            )
+            if (receivedSerialData.length() > 0)
             {
                 String command;
-
                 String data;
-
                 uint32_t sequence = 0;
 
-
                 // Validate message and CRC.
+                bool valid = parseMessage(
+                    receivedSerialData,
+                    command,
+                    data,
+                    sequence
+                );
 
-                bool valid =
-                    parseMessage(
-                        receivedSerialData,
-                        command,
-                        data,
-                        sequence
-                    );
+                // ====================================================
+                // PONG: BALLOT UNIT COMMUNICATION RESPONSE
+                // ====================================================
 
+                if (valid && command == "PONG" && data == "OK")
+                {
+                    // The Ballot Unit is online.
+                    ballotCommunicationReady = true;
+                    ballotPingOutstanding = false;
 
-                // Only VOTE messages are expected here.
+                    if (systemReady &&
+                        !adminSessionActive &&
+                        !voterSessionActive)
+                    {
+                        showReadyScreen();
+                    }
+                }
 
-                if (
-                    valid &&
-                    command == "VOTE"
-                )
+                // ====================================================
+                // SELECT: DISPLAY THE TEMPORARY CANDIDATE SELECTION
+                // ====================================================
+
+                else if (valid && command == "SELECT")
+                {
+                    // Update the LCD only for the active voter's
+                    // current session while the poll is open.
+
+                    if (voterSessionActive &&
+                        pollOpen &&
+                        sequence == currentSessionSequence)
+                    {
+                        if (data == "A")
+                        {
+                            displayLCD(
+                                "SELECTED",
+                                "CANDIDATE A"
+                            );
+                        }
+                        else if (data == "B")
+                        {
+                            displayLCD(
+                                "SELECTED",
+                                "CANDIDATE B"
+                            );
+                        }
+                        else if (data == "C")
+                        {
+                            displayLCD(
+                                "SELECTED",
+                                "CANDIDATE C"
+                            );
+                        }
+                        else if (data == "N")
+                        {
+                            displayLCD(
+                                "SELECTED",
+                                "CANDIDATE NOTA"
+                            );
+                        }
+                        else if (data == "NONE")
+                        {
+                            // The voter pressed CHANGE.
+                            // Return to the selection screen.
+
+                            displayLCD(
+                                "VOTER VERIFIED",
+                                "SELECT CANDIDATE"
+                            );
+                        }
+                    }
+                }
+
+                // ====================================================
+                // VOTE: PROCESS THE CONFIRMED VOTE
+                // ====================================================
+
+                else if (valid && command == "VOTE")
                 {
                     processReceivedVote(
                         data,
@@ -3647,25 +3679,18 @@ void serialTask()
                 }
             }
 
-
-            // Clear buffer for next message.
-
+            // Clear buffer for the next message.
             receivedSerialData = "";
         }
-
 
         // ====================================================
         // STORE RECEIVED CHARACTER
         // ====================================================
 
-        else if (
-            receivedSerialData.length() < 60
-        )
+        else if (receivedSerialData.length() < 60)
         {
-            receivedSerialData +=
-                receivedCharacter;
+            receivedSerialData += receivedCharacter;
         }
-
 
         // ====================================================
         // MESSAGE TOO LONG
@@ -3855,7 +3880,6 @@ void setup()
 
     loadSystemConfiguration();
 
-
     loadElectionState();
 
 
@@ -3885,7 +3909,7 @@ void setup()
             "RFID ERROR"
         );
 
-
+  
         // Stay here permanently.
 
         while (true)
@@ -3896,24 +3920,22 @@ void setup()
 
 
     // ========================================================
-    // BALLOT COMMUNICATION SELF-TEST
+    // BALLOT COMMUNICATION
+    // ========================================================
+    // Do not halt setup if the Ballot Unit is powered later.
+    // loop() retries PING until a valid PONG is received.
+    // Poll opening and voter authentication remain blocked
+    // until ballotCommunicationReady becomes true.
     // ========================================================
 
-    if (
-        !testBallotCommunication()
-    )
-    {
-        displayLCD(
-            "SELF TEST FAILED",
-            "COMMS ERROR"
-        );
+    ballotCommunicationReady = false;
+    ballotPingOutstanding = false;
+    nextBallotPingAt = millis();
 
-
-        while (true)
-        {
-            delay(100);
-        }
-    }
+    displayLCD(
+        "WAIT FOR BALLOT",
+        "CHECK POWER/LINK"
+    );
 
 
     // ========================================================
@@ -3991,6 +4013,8 @@ void loop()
     // ========================================================
 
     serialTask();
+
+    ballotCommunicationTask();
 
 
     // ========================================================

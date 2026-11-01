@@ -5,7 +5,7 @@
 //
 // Board:
 // Arduino UNO #1
-//
+// 
 // Purpose:
 // - Receive voting permission from the Control Unit
 // - Allow the voter to select one candidate or NOTA
@@ -1138,6 +1138,12 @@ void loop()
         if (buttonPressed(BUTTON_CHANGE))
         {
             clearSelection();
+
+            sendMessage(
+                "SELECT",
+                "NONE",
+                sessionSequence
+            );
         }
 
         else if (buttonPressed(BUTTON_CONFIRM))
